@@ -15,6 +15,7 @@ public:
 	MySDL(int width, int height);
 	void Init();
 	void Render(AVFrame* yuvFrame);
+	void Delay();
 	void Close();
 
 private:

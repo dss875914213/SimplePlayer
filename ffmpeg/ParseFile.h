@@ -1,4 +1,5 @@
 #pragma once
+#include <iostream>
 extern "C"
 {
 #include "libavformat/avformat.h"
@@ -16,21 +17,26 @@ class ParseFile
 {
 public:
 	ParseFile(string fileNmae);
-	void OpenFile();
-	void FindStream();
-	void LocateVideoStream();
-	void CreateCodecContext();
-	void InitFrame();
-	void InitSwScaleContext();
-	void AllocatePacket();
 
-	void ReadData();
-	void DecodeData();
-	void ConvertVideo();
+	bool Init();
+	bool ReadData();
 	void Close();
+
 	int GetWidth();
 	int GetHeight();
 	AVFrame* GetFrame();
+
+private:
+	bool OpenFile();
+	bool FindStream();
+	bool LocateVideoStream();
+	bool CreateCodecContext();
+	bool InitFrame();
+	bool InitSwScaleContext();
+	bool AllocatePacket();
+
+	bool DecodeData();
+	bool ConvertVideo();
 
 private:
 	string m_fileName;

@@ -44,6 +44,10 @@ void MySDL::Render(AVFrame* yuvFrame)
 	SDL_RenderCopy(m_sdlRenderer, m_sdlTexture,
 		NULL, m_sdlRect);
 	SDL_RenderPresent(m_sdlRenderer);
+}
+
+void MySDL::Delay()
+{
 	SDL_Delay(40);
 }
 
