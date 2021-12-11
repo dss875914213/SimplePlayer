@@ -19,13 +19,12 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="MySDL.cpp" />
-    <ClCompile Include="ParseFile.cpp" />
+    <ClCompile Include="cmdutils.c" />
+    <ClCompile Include="main.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="MySDL.h" />
-    <ClInclude Include="ParseFile.h" />
+    <ClInclude Include="cmdutils.h" />
+    <ClInclude Include="config.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
