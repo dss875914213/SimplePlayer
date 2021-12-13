@@ -99,7 +99,7 @@ typedef struct Clock {
 	double speed;
 	int serial;
 	int paused;
-	int queue_serial;
+	int* queue_serial;
 }Clock;
 
 typedef struct Frame
@@ -1247,6 +1247,245 @@ static void do_exit(VideoState* is)
 static void sigterm_handler(int sig)
 {
 	exit(123);
+}
+
+static void set_default_window_size(int width, int height, AVRational sar)
+{
+	SDL_Rect rect;
+	int max_width = screen_width ? screen_width : INT_MAX;
+	int max_height = screen_height ? screen_height : INT_MAX;
+	if (max_width == INT_MAX && max_height == INT_MAX)
+		max_height = height;
+	calculate_display_rect(&rect, 0, 0, max_width, max_height, width, height, sar);
+	default_width = rect.w;
+	default_height = rect.h;
+}
+
+static int video_open(VideoState* is)
+{
+	int w, h;
+	w = screen_width ? screen_width : default_width;
+	h = screen_height ? screen_height : default_height;
+	if (!window_title)
+		window_title = input_filename;
+	SDL_SetWindowTitle(window, window_title);
+	SDL_SetWindowSize(window, w, h);
+	SDL_SetWindowPosition(window, screen_left, screen_top);
+	if (is_full_screen)
+		SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+	SDL_ShowWindow(window);
+	is->width = w;
+	is->height = h;
+	return 0;
+}
+
+static void video_display(VideoState* is)
+{
+	if (!is->width)
+		video_open(is);
+
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+	SDL_RenderClear(renderer);
+	if (is->audio_st && is->show_mode != SHOW_MODE_VIDEO)
+		video_audio_display(is);
+	else if (is->video_st)
+		video_image_display(is);
+	SDL_RenderPresent(renderer);
+}
+
+
+static double get_clock(Clock* c)
+{
+	if (*c->queue_serial != c->serial)
+		return NAN;
+	if (c->paused)
+		return c->pts;
+	else
+	{
+		double time = av_gettime_relative() / 1000000.0;
+		return c->pts_drift + time - (time - c->last_updated) * (1.0 - c->speed);
+	}
+}
+
+static void set_clock_at(Clock* c, double pts, int serial, double time)
+{
+	c->pts = pts;
+	c->last_updated = time;
+	c->pts_drift = c->pts - time;
+	c->serial = serial;
+}
+
+static void set_clock(Clock* c, double pts, int serial)
+{
+	double time = av_gettime_relative() / 1000000.0;
+	set_clock_at(c, pts, serial, time);
+}
+
+static void set_clock_speed(Clock* c, double speed)
+{
+	set_clock(c, get_clock(c), c->serial);
+	c->speed = speed;
+}
+
+static void init_clock(Clock* c, int* queue_serial)
+{
+	c->speed = 1.0;
+	c->paused = 0;
+	c->queue_serial = queue_serial;
+	set_clock(c, NAN, -1);
+}
+
+static void sync_clock_to_slave(Clock* c, Clock* slave)
+{
+	double clock = get_clock(c);
+	double slave_clock = get_clock(slave);
+	if (!isnan(slave_clock) && (isnan(clock) || fabs(clock - slave_clock) > AV_NOSYNC_THRESHOLD))
+		set_clock(c, slave_clock, slave->serial);
+}
+
+static int get_master_sync_type(VideoState* is)
+{
+	if (is->av_sync_type == AV_SYNC_VIDEO_MASTER)
+	{
+		if (is->video_st)
+			return AV_SYNC_VIDEO_MASTER;
+		else
+			return AV_SYNC_AUDIO_MASTYER;
+	}
+	else if (is->av_sync_type == AV_SYNC_AUDIO_MASTYER)
+	{
+		if (is->audio_st)
+			return AV_SYNC_AUDIO_MASTYER;
+		else
+			return AV_SYNC_EXTERNAL_CLOCK;
+	}
+	else
+		return AV_SYNC_EXTERNAL_CLOCK;
+}
+
+static double get_master_clock(VideoState* is)
+{
+	double val;
+	switch (get_master_sync_type(is))
+	{
+	case AV_SYNC_VIDEO_MASTER:
+		val = get_clock(&is->vidclk);
+		break;
+	case AV_SYNC_AUDIO_MASTYER:
+		val = get_clock(&is->audclk);
+		break;
+	default:
+		val = get_clock(&is->extclk);
+		break;
+	}
+	return val;
+}
+
+static void check_external_clock_speed(VideoState* is)
+{
+	if (is->video_stream >= 0 && is->videoq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES ||
+		is->audio_stream >= 0 && is->audioq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES)
+	{
+		set_clock_speed(&is->extclk, FFMAX(EXTERNAL_CLOCK_SPEED_MIN, is->extclk.speed - EXTERNAL_CLOCK_SPEED_STEP));
+	}
+	else if ((is->video_stream<0 || is->videoq.nb_packets>EXTERNAL_CLOCK_MAX_FRAMES) &&
+		(is->audio_stream<0 || is->audioq.nb_packets>EXTERNAL_CLOCK_MAX_FRAMES))
+	{
+		set_clock_speed(&is->extclk, FFMIN(EXTERNAL_CLOCK_SPEED_MAX, is->extclk.speed + EXTERNAL_CLOCK_SPEED_STEP));
+	}
+	else
+	{
+		double speed = is->extclk.speed;
+		if (speed != 1.0)
+			set_clock_speed(&is->extclk, speed + EXTERNAL_CLOCK_SPEED_STEP * (1.0 - speed) / fabs(1.0 - speed));
+	}
+}
+
+static void stream_seek(VideoState* is, int64_t pos, int64_t rel, int seek_by_bytes)
+{
+	if (!is->seek_req)
+	{
+		is->seek_pos = pos;
+		is->seek_rel = rel;
+		is->seek_flags &= -AVSEEK_FLAG_BYTE;
+		if (seek_by_bytes)
+			is->seek_flags |= AVSEEK_FLAG_BYTE;
+		is->seek_req = 1;
+		SDL_CondSignal(is->continue_read_thread);
+	}
+}
+
+static void stream_toggle_pause(VideoState* is)
+{
+	if (is->paused)
+	{
+		is->frame_timer += av_gettime_relative() / 1000000.0 - is->vidclk.last_updated;
+		if (is->read_pause_return != AVERROR(ENOSYS))
+			is->vidclk.paused = 0;
+		set_clock(&is->vidclk, get_clock(&is->vidclk), is->vidclk.serial);
+	}
+	set_clock(&is->extclk, get_clock(&is->extclk), is->extclk.serial);
+	is->paused = is->audclk.paused = is->vidclk.paused = is->extclk.paused = !is->paused;
+}
+
+static void toggle_pause(VideoState* is)
+{
+	stream_toggle_pause(is);
+	is->step = 0;
+}
+
+static void toggle_mute(VideoState* is)
+{
+	is->muted = !is->muted;
+}
+
+static void update_volume(VideoState* is, int sign, double step)
+{
+	double volume_level = is->audio_volume ? (20 * log(is->audio_volume / (double)SDL_MIN_MAXVOLUME) / log(10)) : -1000.0;
+	int new_volume = lrint(SDL_MIX_MAXVOLUME * pow(10.0, (volume_level + sign * step) / 20.0));
+	is->audio_volume = av_clip(is->audio_volume == new_volume ? (is->audio_volume + sign) : new_volume, 0, SDL_MIN_MAXVOLUME);
+}
+
+static void step_to_next_frame(VideoState* is)
+{
+	if (is->paused)
+		stream_toggle_pause(is);
+	is->step = 1;
+}
+
+static double compute_target_delay(double delay, VideoState* is)
+{
+	double sync_threhold, diff = 0;
+	if (get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)
+	{
+		diff = get_clock(&is->vidclk) - get_master_clock(is);
+		sync_threhold = FFMAX(AV_SYNC_THRESHOLD_MIN, FFMIN(AV_SYNC_THRESHOLD_MAX, delay));
+		if (!isnan(diff) && fabs(diff) < is->max_frame_duration)
+		{
+			if (diff <= -sync_threhold)
+				delay = FFMAX(0, delay + diff);
+			else if (diff >= sync_threhold && delay > AV_SYNC_FRAMEUP_THRESHOLD)
+				delay += diff;
+			else if (diff >= sync_threhold)
+				delay *= 2;
+		}
+	}
+	av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n", delay, -diff);
+	return delay;
+}
+
+static double vp_duration(VideoState* is, Frame* vp, Frame* nextvp)
+{
+	if (vp->serial == nextvp->serial)
+	{
+		double duration = nextvp->pts - vp->pts;
+		if (isnan(duration) || duration <= 0 || duration > is->max_frame_duration)
+			return vp->duration;
+		else
+			return duration;
+	}
+	else
+		return 0.0;
 }
 
 
