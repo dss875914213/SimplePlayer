@@ -2384,6 +2384,165 @@ static int read_thread(void* arg)
 		st_index[AVMEDIA_TYPE_SUBTITLE] = av_find_best_stream(ic, AVMEDIA_TYPE_SUBTITLE, st_index[AVMEDIA_TYPE_SUBTITLE],
 			(st_index[AVMEDIA_TYPE_AUDIO] >= 0 ? st_index[AVMEDIA_TYPE_AUDIO] : st_index[AVMEDIA_TYPE_VIDEO]), NULL, 0);
 	is->show_mode = show_mode;
+	if (st_index[AVMEDIA_TYPE_VIDEO] >= 0)
+	{
+		AVStream* st = ic->streams[st_index[AVMEDIA_TYPE_VIDEO]];
+		AVCodecParameters* codecpar = st->codecpar;
+		AVRational sar = av_guess_sample_aspect_ratio(ic, st, NULL);
+		if (codecpar->width)
+			set_default_window_size(codecpar->width, codecpar->height, sar);
+	}
+
+	if (st_index[AVMEDIA_TYPE_AUDIO] >= 0)
+	{
+		stream_component_open(is, st_index[AVMEDIA_TYPE_VIDEO]);
+	}
+	ret = -1;
+	if (st_index[AVMEDIA_TYPE_VIDEO] >= 0)
+		ret = stream_component_open(is, st_index[AVMEDIA_TYPE_VIDEO]);
+
+	if (is->show_mode == SHOW_MODE_NONE)
+		is->show_mode = ret >= 0 ? SHOW_MODE_VIDEO : SHOW_MODE_RDFT;
+	if (st_index[AVMEDIA_TYPE_SUBTITLE] >= 0)
+		stream_component_open(is, st_index[AVMEDIA_TYPE_SUBTITLE]);
+	if (is->video_stream < 0 && is->audio_stream < 0)
+	{
+		av_log(NULL, AV_LOG_FATAL, "Failed to open file '%s' or configure filter graph\n", is->filename);
+		ret = -1;
+		goto fail;
+	}
+	if (infinite_buffer < 0 && is->realtime)
+		infinite_buffer = 1;
+	for (;;)
+	{
+		if (is->abort_request)
+			break;
+		if (is->paused != is->last_paused)
+		{
+			is->last_paused = is->paused;
+			if (is->paused)
+				is->read_pause_return = av_read_pause(ic);
+			else
+				av_read_play(ic);
+		}
+#if CONFIG_RTSP_DEMUXER || CONFIG_MMSH_PROTOCOL
+		if (is->paused && (!strcmp(ic->iformat->name, "rtsp") ||
+			(ic->pb && !strncmp(input_filename, "mmsh:", 5))))
+		{
+			SDL_Delay(10);
+			continue;
+		}
+#endif
+		if (is->seek_req)
+		{
+			int64_t seek_target = is->seek_pos;
+			int64_t seek_min = is->seek_rel > 0 ? seek_target - is->seek_rel + 2 : INT64_MIN;
+			int64_t seek_max = is->seek_rel < 0 ? seek_target - is->seek_rel - 2 : INT64_MAX;
+
+			ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
+			if (ret < 0)
+				av_log(NULL, AV_LOG_ERROR, "%s: error while seeking\n", is->ic->url);
+			else
+			{
+				if (is->audio_stream >= 0)
+					packet_queue_flush(&is->audioq);
+				if (is->subtitle_stream >= 0)
+					packet_queue_flush(&is->subtitleq);
+				if (is->video_stream >= 0)
+					packet_queue_flush(&is->videoq);
+				if (is->seek_flags & AVSEEK_FLAG_BYTE)
+					set_clock(&is->extclk, NAN, 0);
+				else
+					set_clock(&is->extclk, seek_target / (double)AV_TIME_BASE, 0);
+			}
+			is->seek_req = 0;
+			is->queue_attachments_req = 1;
+			is->eof = 0;
+			if (is->paused)
+				step_to_next_frame(is);
+		}
+		if (is->queue_attachments_req)
+		{
+			if (is->video_st && is->video_st->disposition & AV_DISPOSITION_ATTACHED_PIC)
+			{
+				if ((ret = av_packet_ref(pkt, &is->video_st->attached_pic)) < 0)
+					goto fail;
+				packet_queue_put(&is->videoq, pkt);
+				packet_queue_put_nullpacket(&is->videoq, pkt, is->video_stream);
+			}
+			is->queue_attachments_req = 0;
+		}
+
+		if (infinite_buffer < 1 &&
+			(is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE
+				|| (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) &&
+					stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq) &&
+					stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq))))
+		{
+			SDL_LockMutex(wait_mutex);
+			SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+			SDL_UnlockMutex(wait_mutex);
+			continue;
+		}
+		ret = av_read_frame(ic, pkt);
+		if (ret < 0)
+		{
+			if ((ret == AVERROR_EOF || avio_feof(ic->pb)) && !is->eof)
+			{
+				if (is->video_stream >= 0)
+					packet_queue_put_nullpacket(&is->videoq, pkt, is->video_stream);
+				if (is->audio_stream >= 0)
+					packet_queue_put_nullpacket(&is->audioq, pkt, is->audio_stream);
+				if (is->subtitle_stream >= 0)
+					packet_queue_put_nullpacket(&is->subtitleq, pkt, is->subtitle_stream);
+				is->eof = 1;
+			}
+			if (ic->pb && ic->pb->error)
+			{
+				if (autoexit)
+					goto fail;
+				else
+					break;
+			}
+			SDL_LockMutex(wait_mutex);
+			SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+			SDL_UnlockMutex(wait_mutex);
+			continue;
+		}
+		else
+			is->eof = 0;
+
+		stream_start_time = ic->streams[pkt->stream_index]->start_time;
+		pkt_ts = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
+		pkt_in_play_range = duration == AV_NOPTS_VALUE ||
+			(pkt_ts - (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0)) *
+			av_q2d(ic->streams[pkt->stream_index]->time_base) -
+			(double)(start_time != AV_NOPTS_VALUE ? start_time : 0) / 1000000
+			<= ((double)duration / 1000000);
+		if (pkt->stream_index == is->audio_stream && pkt_in_play_range)
+			packet_queue_put(&is->audioq, pkt);
+		else if (pkt->stream_index == is->video_stream && pkt_in_play_range
+			&& !(is->video_st->disposition & AV_DISPOSITION_ATTACHED_PIC))
+			packet_queue_put(&is->videoq, pkt);
+		else if (pkt->stream_index == is->subtitle_stream && pkt_in_play_range)
+			packet_queue_put(&is->subtitleq, pkt);
+		else
+			av_packet_unref(pkt);
+	}
+	ret = 0;
+fail:
+	if (ic && !is->ic)
+		avformat_close_input(&ic);
+	av_packet_free(&pkt);
+	if (ret != 0)
+	{
+		SDL_Event event;
+		event.type = FF_QUIT_EVENT;
+		event.user.data1 = is;
+		SDL_PushEvent(&event);
+	}
+	SDL_DestroyMutex(wait_mutex);
+	return 0;
 }
 
 
