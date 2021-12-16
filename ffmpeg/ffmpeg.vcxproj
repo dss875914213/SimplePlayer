@@ -21,7 +21,6 @@
   <ItemGroup>
     <ClCompile Include="cmdutils.c" />
     <ClCompile Include="main.c" />
-    <ClCompile Include="test.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="cmdutils.h" />
