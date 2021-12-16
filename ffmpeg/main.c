@@ -3619,19 +3619,17 @@ int main(int argc, char* argv[])
 {
 	int flags;
 	VideoState* is;
-	init_dynload();
 	av_log_set_flags(AV_LOG_SKIP_REPEATED);
-	parse_loglevel(argc, argv, options);
 #if CONFIG_AVDEVICE
 	avdevice_register_all();
 #endif
-	avformat_network_init();
 
-	signal(SIGINT, sigterm_handler);
-	signal(SIGTERM, sigterm_handler);
-
-	show_banner(argc, argv, options);
-	parse_options(NULL, argc, argv, options, opt_input_file);
+	if (argc < 2)
+	{
+		av_log(NULL, AV_LOG_FATAL, "Need support video name!\n");
+		return -1;
+	}
+	input_filename = argv[1];
 
 	if (!input_filename)
 	{
