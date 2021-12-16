@@ -1212,7 +1212,7 @@ static void stream_component_close(VideoState* is, int stream_index)
 		SDL_CloseAudioDevice(audio_dev);
 		decoder_destroy(&is->auddec);
 		swr_free(&is->swr_ctx);
-		av_freep(&is->audio_buf);
+		av_freep(&is->audio_buf1);
 		is->audio_buf1_size = 0;
 		is->audio_buf = NULL;
 		if (is->rdft)
