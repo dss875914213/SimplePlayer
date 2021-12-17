@@ -5,6 +5,31 @@
 #include <signal.h>
 #include <stdint.h>
 
+#include "libavformat/avformat.h"
+#include "libavfilter/avfilter.h"
+#include "libavdevice/avdevice.h"
+#include "libswscale/swscale.h"
+#include "libswresample/swresample.h"
+//#include "libpostproc/postprocess.h"
+#include "libavutil/attributes.h"
+#include "libavutil/avassert.h"
+#include "libavutil/avstring.h"
+#include "libavutil/bprint.h"
+#include "libavutil/channel_layout.h"
+#include "libavutil/display.h"
+#include "libavutil/mathematics.h"
+#include "libavutil/imgutils.h"
+//#include "libavutil/libm.h"
+#include "libavutil/parseutils.h"
+#include "libavutil/pixdesc.h"
+#include "libavutil/eval.h"
+#include "libavutil/dict.h"
+#include "libavutil/opt.h"
+#include "libavutil/cpu.h"
+#include "libavutil/ffversion.h"
+#include "libavutil/version.h"
+#include "libavcodec/bsf.h"
+
 #include "libavutil/avstring.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/eval.h"
@@ -27,7 +52,33 @@
 #include "SDL/SDL.h"
 #include "SDL/SDL_thread.h"
 
-#include "cmdutils.h"
+
+AVDictionary* sws_dict;
+AVDictionary* swr_opts;
+AVDictionary* format_opts, * codec_opts;
+#define HAS_ARG    0x0001
+#define OPT_BOOL   0x0002
+#define OPT_EXPERT 0x0004
+#define OPT_STRING 0x0008
+#define OPT_VIDEO  0x0010
+#define OPT_AUDIO  0x0020
+#define OPT_INT    0x0080
+#define OPT_FLOAT  0x0100
+#define OPT_SUBTITLE 0x0200
+#define OPT_INT64  0x0400
+#define OPT_EXIT   0x0800
+#define OPT_DATA   0x1000
+#define OPT_PERFILE  0x2000     /* the option is per-file (currently ffmpeg-only).
+								   implied by OPT_OFFSET or OPT_SPEC */
+#define OPT_OFFSET 0x4000       /* option is specified as an offset in a passed optctx */
+#define OPT_SPEC   0x8000       /* option is to be stored in an array of SpecifierOpt.
+								   Implies OPT_OFFSET. Next element after the offset is
+								   an int containing element count in the array. */
+#define OPT_TIME  0x10000
+#define OPT_DOUBLE 0x20000
+#define OPT_INPUT  0x40000
+#define OPT_OUTPUT 0x80000
+//#include "cmdutils.h"
 
 #if CONFIG_AVFILTER
 # include "libavfilter/avfilter.h"
@@ -3517,102 +3568,9 @@ static int opt_codec(void* optctx, const char* opt, const char* arg)
 
 static int dummy;
 
-static const OptionDef options[] = {
-	CMDUTILS_COMMON_OPTIONS
-	{"x", HAS_ARG, {.func_arg = opt_width}, "force displayed width", "width" },
-	{"y", HAS_ARG, {.func_arg = opt_height}, "force displayed height", "height"},
-	{"s", HAS_ARG | OPT_VIDEO, {.func_arg = opt_frame_size}, "set frame size (WxH or abbreviation)", "size"},
-	{"fs", OPT_BOOL, {&is_full_screen}, "force_full_screen"},
-	{"an", OPT_BOOL, {&audio_disable}, "disable_audio"},
-	{"vn", OPT_BOOL, {&video_disable}, "disable_video"},
-	{"sn", OPT_BOOL, {&subtitle_disable}, "disable_subtitling"},
-	{"ast", OPT_STRING | HAS_ARG | OPT_EXPERT, {&wanted_stream_spec[AVMEDIA_TYPE_AUDIO]}, "select desired audio stream", "stream_specifier"},
-	{"vst", OPT_STRING | HAS_ARG | OPT_EXPERT, {&wanted_stream_spec[AVMEDIA_TYPE_VIDEO]}, "select desired video stream", "stream_specifier" },
-	{"sst", OPT_STRING | HAS_ARG | OPT_EXPERT, {&wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE]}, "select desired subtitle stream", "stream_specifier"},
-	{"ss", HAS_ARG, {.func_arg = opt_seek}, "seek to a given position in seconds", "pos"},
-	{"t", HAS_ARG, {.func_arg = opt_duration}, "play \"duration\" seconds of audio/video", "duration"},
-	{"bytes", OPT_INT | HAS_ARG,{&seek_by_bytes}, "seek by bytes 0=off 1=on -1=auto", "val"},
-	{"seek_interval", OPT_FLOAT | HAS_ARG, {&seek_interval}, "set seek interval for left/right keys, in seconds", "seconds"},
-	{"nodisp", OPT_BOOL, {&display_disable}, "disable_graphical display"},
-	{"noborder", OPT_BOOL, {&borderless}, "borderless window"},
-	{"alwaysontop", OPT_BOOL, { &alwaysontop}, "window always on top"},
-	{"volume", OPT_INT | HAS_ARG, {&startup_volume}, "set startup volume 0=min 100=max", "volume"},
-	{"f", HAS_ARG, {.func_arg = opt_format}, "force format", "fmt"},
-	{"pix_fmt", HAS_ARG | OPT_EXPERT | OPT_VIDEO, {.func_arg = opt_frame_pix_fmt}, "set pixel format", "format"},
-	{"status", OPT_BOOL | OPT_EXPERT, {&show_status}, "show status", ""},
-	{"fast", OPT_BOOL | OPT_EXPERT, {&fast}, "non spec compliant optimizations", ""},
-	{"genpts", OPT_BOOL | OPT_EXPERT, {&genpts}, "generate_pts", ""},
-	{"drp", OPT_INT | HAS_ARG | OPT_EXPERT, {&decoder_reorder_pts}, "let decoder reorder pts 0=off 1=on -1=auto", ""},
-	{"lowres", OPT_INT | HAS_ARG | OPT_EXPERT, {&lowres}, "", ""},
-	{"sync", HAS_ARG | OPT_EXPERT, {.func_arg = opt_sync}, "set audio-video sync. type {type=audio/video/ext}", "type"},
-	{"autoexit", OPT_BOOL | OPT_EXPERT, {&autoexit}, "exit at the end", ""},
-	{"exitonkeydown", OPT_BOOL | OPT_EXPERT, {&exit_on_keydown}, "exit on key down", ""},
-	{"exitonmousedown", OPT_BOOL | OPT_EXPERT, {&exit_on_mousedown}, "exit on mouse down", ""},
-	{"loop", OPT_INT | HAS_ARG | OPT_EXPERT, {&loop}, "set number of times the playback shall be looped", "loop count"},
-	{"framedrop", OPT_BOOL | OPT_EXPERT, {&framedrop}, "drop frames when cpu is too slow", ""},
-	{"infbuf", OPT_BOOL | OPT_EXPERT, {&infinite_buffer}, "don't limit the input buffer size (useful with realtime streams)", ""},
-	{"widnow_title", OPT_STRING | HAS_ARG, {&window_title}, "set window title", "window title"},
-	{"left", OPT_INT | HAS_ARG | OPT_EXPERT, {&screen_left}, "set the x position for the left of the window", "x pos"},
-	{"top", OPT_INT | HAS_ARG | OPT_EXPERT, {&screen_top}, "set the y position for the top of the window", "y pos"},
-
-#if CONFIG_AVFILTER
-	{ "vf", OPT_EXPERT | HAS_ARG, {.func_arg = opt_add_vfilter }, "set video filters", "filter_graph" },
-	{ "af", OPT_STRING | HAS_ARG, { &afilters }, "set audio filters", "filter_graph" },
-#endif
-	{"rdftspeed", OPT_INT | HAS_ARG | OPT_AUDIO | OPT_EXPERT, {&rdftspeed}, "rdft_speed", "msecs"},
-	{"showmode", HAS_ARG, {.func_arg = opt_show_mode}, "select show mode {0 = video, 1 = waves, 2 = RDFT)", "mode"},
-	{"default", HAS_ARG | OPT_AUDIO | OPT_VIDEO | OPT_EXPERT, {.func_arg = opt_default}, "generic catch all option", ""},
-	{"i", OPT_BOOL, {&dummy}, "read specified file", "input_file"},
-	{"codec", HAS_ARG, {.func_arg = opt_codec}, "force decoder", "decoder_name"},
-	{"acodec", HAS_ARG | OPT_STRING | OPT_EXPERT, {&audio_codec_name}, "force audio decoder", "decoder_name"},
-	{"scodec",HAS_ARG | OPT_STRING | OPT_EXPERT, {&subtitle_codec_name}, "force subtitle decoder", "decoder_name"},
-	{"vcodec", HAS_ARG | OPT_STRING | OPT_EXPERT,{&video_codec_name}, "force video decoder", "decoder_name"},
-	{"autorotate", OPT_BOOL, {&autorotate}, "automatically rotate video", ""},
-	{"find_stream_info", OPT_BOOL | OPT_INPUT | OPT_EXPERT, {&find_stream_info},
-	"read and decode the streams to fill missing information with heuristics"},
-	{"filter_threads", HAS_ARG | OPT_INT | OPT_EXPERT, {&filter_nbthreads}, "number of filter threads per graph"},
-	{NULL},
-};
-
-static void show_usage(void)
-{
-	av_log(NULL, AV_LOG_INFO, "Simple media player\n");
-	av_log(NULL, AV_LOG_INFO, "usage: %s {options} input_file\n", program_name);
-	av_log(NULL, AV_LOG_INFO, "\n");
-}
 
 void show_help_default(const char* opt, const char* arg)
 {
-	av_log_set_callback(log_callback_help);
-	show_usage();
-	show_help_options(options, "Main options:", 0, OPT_EXPERT, 0);
-	show_help_options(options, "Advanced options:", OPT_EXPERT, 0, 0);
-	printf("\n");
-	show_help_children(avcodec_get_class(), AV_OPT_FLAG_DECODING_PARAM);
-	show_help_children(avformat_get_class(), AV_OPT_FLAG_DECODING_PARAM);
-#if !CONFIG_AVFILTER
-	show_help_children(sws_get_class(), AV_OPT_FLAG_ENCODING_PARAM);
-#else
-	show_help_children(avfilter_get_class(), AV_OPT_FLAG_FILTERING_PARAM);
-#endif
-	printf("\nWhile playing:\n"
-		"q, ESC  quit\n"
-		"f		toggle full screen\n"
-		"p, SPC pause\n"
-		"m 	toggle mute\n"
-		"9, 0		decrease and increase volume respectively\n"
-		"/, *		decrease and increase volume respectively\n"
-		"a          cycle audio channel in the current program\n"
-		"v          cycle video channel\n"
-		"t          cycle subtitle channel in the current program\n"
-		"c          cycle program\n"
-		"w          cycle video filters or show modes\n"
-		"s          activate frame-step mode\n"
-		"left/right seek backward/forward 10 seconds or to custom interval if -seek_interval is set\n"
-		"down/up    seek backward/forward 1 minutes\n"
-		"page down/page up  seek backward/forward 10 minutes\n"
-		"right mouse click  seek to percentage in file corresponding to fraction of width\n"
-		"left double-click  toggle full screen\n");
 }
 
 int main(int argc, char* argv[])
@@ -3633,9 +3591,7 @@ int main(int argc, char* argv[])
 
 	if (!input_filename)
 	{
-		show_usage();
 		av_log(NULL, AV_LOG_FATAL, "An input file must be specified\n");
-		av_log(NULL, AV_LOG_FATAL, "Use -h to get full help or, even better, run 'man %s'\n", program_name);
 		exit(1);
 	}
 	if (display_disable)
