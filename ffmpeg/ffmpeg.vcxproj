@@ -21,10 +21,13 @@
   <ItemGroup>
     <ClCompile Include="cmdutils.c" />
     <ClCompile Include="main.c" />
+    <ClCompile Include="MySDL.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="cmdutils.h" />
     <ClInclude Include="config.h" />
+    <ClInclude Include="def.h" />
+    <ClInclude Include="MySDL.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
